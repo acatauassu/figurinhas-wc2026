@@ -17,6 +17,14 @@ function normalizeInput(val) {
   return val.replace(/[\s\-]/g, '').toUpperCase();
 }
 
+function parseCodes(raw) {
+  // Suporta: "CAN16, BRA7, FRA12" ou "CAN16 BRA7" ou "CAN16,BRA7"
+  return raw
+    .split(/[,\s]+/)
+    .map(c => c.replace(/[^A-Za-z0-9]/g, '').toUpperCase())
+    .filter(Boolean);
+}
+
 export default function StickerManager() {
   const [stickers, setStickers] = useState([]); // { code, team_code, team_name, number, owned_count }
   const [loading, setLoading] = useState(true);
@@ -58,30 +66,49 @@ export default function StickerManager() {
   };
 
   const addSticker = async () => {
-    const code = normalizeInput(input);
-    if (!code) return;
+    const raw = input.trim();
+    if (!raw) return;
+
+    const codes = parseCodes(raw);
+    if (codes.length === 0) return;
+
     setAdding(true);
-    try {
-      const { data } = await api.post('/api/stickers/add', { code });
-      setStickers(prev => {
-        const idx = prev.findIndex(s => s.code === data.code);
-        if (idx >= 0) {
-          const next = [...prev];
-          next[idx] = { ...next[idx], owned_count: data.owned_count };
-          return next;
-        }
-        return [...prev, data];
-      });
-      const label = `${data.team_code} ${data.number}`;
-      if (data.owned_count === 1) showFeedback('ok', `✅ ${label} colada no álbum!`);
-      else showFeedback('ok', `🔄 ${label} já estava — +1 repetida (total: ${data.owned_count - 1})`);
-      setInput('');
-      inputRef.current?.focus();
-    } catch (err) {
-      showFeedback('err', err.response?.data?.error || 'Código inválido');
-    } finally {
-      setAdding(false);
+    const ok = [], err = [];
+
+    for (const code of codes) {
+      try {
+        const { data } = await api.post('/api/stickers/add', { code });
+        ok.push(data);
+        setStickers(prev => {
+          const idx = prev.findIndex(s => s.code === data.code);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = { ...next[idx], owned_count: data.owned_count };
+            return next;
+          }
+          return [...prev, data];
+        });
+      } catch (e) {
+        err.push({ code, msg: e.response?.data?.error || 'inválido' });
+      }
     }
+
+    // Monta feedback
+    let msg = '';
+    if (ok.length > 0) {
+      const novos    = ok.filter(d => d.owned_count === 1);
+      const repets   = ok.filter(d => d.owned_count > 1);
+      if (novos.length)  msg += `✅ ${novos.length} colada${novos.length > 1 ? 's' : ''} no álbum`;
+      if (repets.length) msg += `${novos.length ? '  •  ' : ''}🔄 ${repets.length} repetida${repets.length > 1 ? 's' : ''}`;
+    }
+    if (err.length > 0) {
+      msg += `${ok.length ? '  •  ' : ''}❌ Inválido${err.length > 1 ? 's' : ''}: ${err.map(e => e.code).join(', ')}`;
+    }
+
+    showFeedback(err.length > 0 && ok.length === 0 ? 'err' : 'ok', msg);
+    setInput('');
+    inputRef.current?.focus();
+    setAdding(false);
   };
 
   const removeSticker = async (code) => {
@@ -170,7 +197,7 @@ export default function StickerManager() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && addSticker()}
-              placeholder="Ex: CAN16, BRA7, FRA12..."
+              placeholder="CAN16  ou  CAN16, BRA7, FRA12"
               maxLength={8}
               style={{
                 flex:1, padding:'11px 13px',
