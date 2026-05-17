@@ -1,10 +1,9 @@
 services:
   - type: web
-    name: figurinhas-backend
+    name: figurinhas-app
     env: node
-    rootDir: backend
-    buildCommand: npm install
-    startCommand: npm start
+    buildCommand: cd frontend && npm install && npm run build && cd ../backend && npm install
+    startCommand: cd backend && npm start
     envVars:
       - key: NODE_ENV
         value: production
@@ -15,16 +14,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: ADMIN_PHONE
-        sync: false   # você define manualmente no dashboard do Render
-
-  - type: static
-    name: figurinhas-frontend
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    envVars:
-      - key: VITE_API_URL
-        value: https://figurinhas-backend.onrender.com
+        sync: false
 
 databases:
   - name: figurinhas-db
