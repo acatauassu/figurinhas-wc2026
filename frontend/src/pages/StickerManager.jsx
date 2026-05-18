@@ -1,8 +1,7 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
 
-// 48 times em ordem alfabética (PT-BR)
 const ALL_TEAMS = [
   { code:'RSA', name:'África do Sul',   flag:'🇿🇦' },
   { code:'GER', name:'Alemanha',        flag:'🇩🇪' },
@@ -53,168 +52,219 @@ const ALL_TEAMS = [
   { code:'URU', name:'Uruguai',         flag:'🇺🇾' },
   { code:'UZB', name:'Uzbequistão',     flag:'🇺🇿' },
 ];
+
 const FLAGS = Object.fromEntries(ALL_TEAMS.map(t => [t.code, t.flag]));
-const TOTAL  = ALL_TEAMS.length * 20; // 960
+const TOTAL = ALL_TEAMS.length * 20;
 
-function parseCodes(raw) {
-  return raw.split(',').map(s => s.trim().replace(/[^A-Za-z0-9]/g,'').toUpperCase()).filter(Boolean);
-}
+const USER_COLORS = ['#2563eb','#7c3aed','#db2777','#059669','#d97706','#0891b2','#65a30d','#dc2626'];
+
 function waLink(phone, stickers) {
-  const num = phone.replace(/[^0-9]/g,'');
-  const msg = encodeURIComponent(`Oi! Vi no gerenciador de figurinhas da Copa 2026 que você tem: ${stickers}. Podemos trocar?`);
-  return `https://wa.me/${num}?text=${msg}`;
+  const num  = phone.replace(/[^0-9]/g, '');
+  const text = encodeURIComponent(`Oi! Vi no gerenciador de figurinhas da Copa 2026 que você tem: ${stickers}. Podemos trocar?`);
+  return `https://wa.me/${num}?text=${text}`;
 }
-
-const USER_COLORS = ['#2563eb','#7c3aed','#db2777','#059669','#d97706','#dc2626','#0891b2','#65a30d'];
 
 export default function StickerManager() {
-  const [stickers,  setStickers]  = useState([]);
-  const [loading,   setLoading]   = useState(true);
-  const [input,     setInput]     = useState('');
-  const [feedback,  setFeedback]  = useState(null);
-  const [adding,    setAdding]    = useState(false);
-  const [mainTab,   setMainTab]   = useState('album');   // 'album' | 'buscar'
-  const [filter,    setFilter]    = useState('todas');   // 'todas'|'coladas'|'repetidas'
-  // Buscar Trocas
-  const [needed,    setNeeded]    = useState(new Set());
-  const [teamSearch,setTeamSearch]= useState('');
-  const [searching, setSearching] = useState(false);
-  const [results,   setResults]   = useState(null);
-  const inputRef  = useRef(null);
-  const navigate  = useNavigate();
+  const [stickers,   setStickers]   = useState([]);   // { code, team_code, team_name, number, owned_count }
+  const [loading,    setLoading]    = useState(true);
+  const [saving,     setSaving]     = useState({});   // { [code]: true/false }
+  const [mainTab,    setMainTab]    = useState('album');
+  const [filter,     setFilter]     = useState('todas');
+  const [search,     setSearch]     = useState('');
+  // buscar trocas
+  const [needed,     setNeeded]     = useState(new Set());
+  const [bSearch,    setBSearch]    = useState('');
+  const [searching,  setSearching]  = useState(false);
+  const [results,    setResults]    = useState(null);
+  const navigate = useNavigate();
   const user = JSON.parse(localStorage.getItem('user') || '{}');
 
   useEffect(() => {
     api.get('/api/stickers').then(r => setStickers(r.data)).catch(console.error).finally(() => setLoading(false));
   }, []);
 
+  // mapa rápido: code → owned_count
+  const ownedMap = useMemo(() => {
+    const m = {};
+    stickers.forEach(s => { m[s.code] = s.owned_count; });
+    return m;
+  }, [stickers]);
+
   const stats = useMemo(() => ({
     coladas:   stickers.filter(s => s.owned_count >= 1).length,
-    repetidas: stickers.reduce((a,s) => a + Math.max(0, s.owned_count - 1), 0),
+    repetidas: stickers.reduce((a, s) => a + Math.max(0, s.owned_count - 1), 0),
   }), [stickers]);
 
-  const byTeam = useMemo(() => {
-    const map = {};
-    stickers.forEach(s => {
-      if (!map[s.team_code]) map[s.team_code] = { code:s.team_code, name:s.team_name, items:[] };
-      map[s.team_code].items.push(s);
+  // times visíveis no Meu Album
+  const visibleTeams = useMemo(() => {
+    return ALL_TEAMS.filter(team => {
+      const matchSearch = !search || team.name.toLowerCase().includes(search.toLowerCase()) || team.code.toLowerCase().includes(search.toLowerCase());
+      if (!matchSearch) return false;
+      if (filter === 'coladas')   return Array.from({length:20},(_,i)=>`${team.code}-${i+1}`).some(c => (ownedMap[c]||0) >= 1);
+      if (filter === 'repetidas') return Array.from({length:20},(_,i)=>`${team.code}-${i+1}`).some(c => (ownedMap[c]||0) > 1);
+      return true;
     });
-    return Object.values(map)
-      .map(team => {
-        let items = team.items;
-        if (filter === 'coladas')   items = items.filter(i => i.owned_count === 1);
-        if (filter === 'repetidas') items = items.filter(i => i.owned_count > 1);
-        return { ...team, items };
-      })
-      .filter(t => t.items.length > 0)
-      .sort((a,b) => a.name.localeCompare(b.name));
-  }, [stickers, filter]);
+  }, [filter, search, ownedMap]);
 
-  const flash = (type, msg) => { setFeedback({type,msg}); setTimeout(() => setFeedback(null), 3000); };
+  // times no Buscar
+  const bTeams = useMemo(() =>
+    ALL_TEAMS.filter(t => !bSearch || t.name.toLowerCase().includes(bSearch.toLowerCase()) || t.code.toLowerCase().includes(bSearch.toLowerCase())),
+    [bSearch]
+  );
 
-  const addSticker = async () => {
-    const codes = parseCodes(input);
-    if (!codes.length) return;
-    setAdding(true);
+  const addOne = useCallback(async (code) => {
+    if (saving[code]) return;
+    const teamCode = code.split('-')[0];
+    const num      = parseInt(code.split('-')[1]);
+    const team     = ALL_TEAMS.find(t => t.code === teamCode);
+    // optimistic
+    setStickers(prev => {
+      const idx = prev.findIndex(s => s.code === code);
+      if (idx >= 0) { const n=[...prev]; n[idx]={...n[idx], owned_count:n[idx].owned_count+1}; return n; }
+      return [...prev, { code, team_code:teamCode, team_name:team?.name||teamCode, number:num, owned_count:1 }];
+    });
+    setSaving(p => ({ ...p, [code]: true }));
     try {
-      const { data } = await api.post('/api/stickers/add', { codes });
-      (data.results||[]).forEach(item => {
-        setStickers(prev => {
-          const idx = prev.findIndex(s => s.code === item.code);
-          if (idx >= 0) { const n=[...prev]; n[idx]={...n[idx],owned_count:item.owned_count}; return n; }
-          return [...prev, item];
-        });
+      await api.post('/api/stickers/add', { codes: [code] });
+    } catch {
+      setStickers(prev => {
+        const idx = prev.findIndex(s => s.code === code);
+        if (idx < 0) return prev;
+        const n = [...prev]; n[idx]={...n[idx], owned_count:n[idx].owned_count-1};
+        return n.filter(s => s.owned_count > 0);
       });
-      const novos  = (data.results||[]).filter(d => d.owned_count===1).length;
-      const repets = (data.results||[]).filter(d => d.owned_count>1).length;
-      const errs   = (data.errors||[]).map(e => e.code);
-      let msg = '';
-      if (novos)       msg += `${novos} colada${novos>1?'s':''} no album`;
-      if (repets)      msg += `${msg?' • ':''}${repets} repetida${repets>1?'s':''}`;
-      if (errs.length) msg += `${msg?' • ':''}Invalido: ${errs.join(', ')}`;
-      flash(errs.length&&!novos&&!repets?'err':'ok', msg||'OK');
-      setInput(''); inputRef.current?.focus();
-    } catch (e) { flash('err', e.response?.data?.error||'Erro'); }
-    finally { setAdding(false); }
-  };
+    } finally { setSaving(p => ({ ...p, [code]: false })); }
+  }, [saving]);
 
-  const removeOne = async (code) => {
-    try {
-      const { data } = await api.post('/api/stickers/remove', { code });
-      if (data.owned_count===0) setStickers(p => p.filter(s => s.code!==code));
-      else setStickers(p => p.map(s => s.code===code?{...s,owned_count:data.owned_count}:s));
-    } catch (e) { flash('err', e.response?.data?.error||'Erro'); }
-  };
+  const removeOne = useCallback(async (code, e) => {
+    if (e) e.stopPropagation();
+    if (saving[code]) return;
+    setStickers(prev => {
+      const idx = prev.findIndex(s => s.code === code);
+      if (idx < 0) return prev;
+      const n = [...prev]; n[idx]={...n[idx], owned_count:n[idx].owned_count-1};
+      return n.filter(s => s.owned_count > 0);
+    });
+    setSaving(p => ({ ...p, [code]: true }));
+    try { await api.post('/api/stickers/remove', { code }); }
+    catch {
+      const teamCode = code.split('-')[0]; const num = parseInt(code.split('-')[1]);
+      const team = ALL_TEAMS.find(t => t.code === teamCode);
+      setStickers(prev => {
+        const idx = prev.findIndex(s => s.code === code);
+        if (idx >= 0) { const n=[...prev]; n[idx]={...n[idx],owned_count:n[idx].owned_count+1}; return n; }
+        return [...prev, { code, team_code:teamCode, team_name:team?.name||teamCode, number:num, owned_count:1 }];
+      });
+    } finally { setSaving(p => ({ ...p, [code]: false })); }
+  }, [saving]);
 
-  const toggleNeeded = (code) => {
-    setNeeded(prev => { const n=new Set(prev); n.has(code)?n.delete(code):n.add(code); return n; });
-    setResults(null);
-  };
+  const toggleNeeded = (code) => { setNeeded(prev => { const n=new Set(prev); n.has(code)?n.delete(code):n.add(code); return n; }); setResults(null); };
 
-  const buscarTrocas = async () => {
+  const buscar = async () => {
     if (!needed.size) return;
     setSearching(true); setResults(null);
-    try {
-      const { data } = await api.post('/api/stickers/buscar-trocas', { needed:[...needed] });
-      setResults(data);
-    } catch (e) { flash('err', 'Erro ao buscar'); }
-    finally { setSearching(false); }
+    try { const {data} = await api.post('/api/stickers/buscar-trocas', { needed:[...needed] }); setResults(data); }
+    catch { } finally { setSearching(false); }
   };
-
-  const clearNeeded = () => { setNeeded(new Set()); setResults(null); };
-
-  const filteredTeams = useMemo(() =>
-    ALL_TEAMS.filter(t => !teamSearch || t.name.toLowerCase().includes(teamSearch.toLowerCase()) || t.code.toLowerCase().includes(teamSearch.toLowerCase())),
-    [teamSearch]
-  );
 
   const pct = Math.round((stats.coladas / TOTAL) * 100);
 
-  if (loading) return (
-    <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:'100vh',color:'#64748b',background:'#060d18'}}>Carregando...</div>
+  if (loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:'100vh',color:'#64748b',background:'#060d18'}}>Carregando...</div>;
+
+  // ── helper: renderiza os 20 quadradinhos de um time ──
+  const renderSquares = (teamCode, onClickSquare, onClickRemove, getOwned, highlightSel) => (
+    <div style={{display:'flex',flexWrap:'wrap',gap:3,padding:'8px 10px'}}>
+      {Array.from({length:20},(_,i) => {
+        const num  = i + 1;
+        const code = `${teamCode}-${num}`;
+        const owned = getOwned(code);
+        const isSel = highlightSel ? highlightSel(code) : false;
+        const reps  = Math.max(0, owned - 1);
+        return (
+          <div key={num} style={{position:'relative', width:32, height:32}}>
+            <button onClick={() => onClickSquare(code)} disabled={!!saving[code]} style={{
+              width:32, height:32, borderRadius:7, cursor:saving[code]?'wait':'pointer',
+              border: isSel       ? '2px solid #818cf8' :
+                      owned === 0 ? '1px solid rgba(255,255,255,0.1)' :
+                      owned === 1 ? '2px solid #4ade80' :
+                                   '2px solid #d4a017',
+              background: isSel       ? 'rgba(129,140,248,0.22)' :
+                          owned === 0 ? 'rgba(255,255,255,0.03)' :
+                          owned === 1 ? 'rgba(74,222,128,0.18)' :
+                                       'rgba(212,160,23,0.18)',
+              color: isSel       ? '#818cf8' :
+                     owned === 0 ? '#334155' :
+                     owned === 1 ? '#4ade80' : '#d4a017',
+              fontSize: 10, fontWeight: owned>0||isSel ? 900 : 400,
+              display:'flex', alignItems:'center', justifyContent:'center',
+              transition:'all 0.12s', flexDirection:'column', gap:0, lineHeight:1,
+            }}>
+              <span>{num}</span>
+              {reps > 0 && <span style={{fontSize:8,lineHeight:1}}>+{reps}</span>}
+            </button>
+            {onClickRemove && owned > 0 && (
+              <button onClick={(e) => onClickRemove(code, e)} style={{
+                position:'absolute', top:-5, right:-5, width:16, height:16,
+                borderRadius:'50%', background:'#ef4444', border:'1.5px solid #060d18',
+                color:'#fff', cursor:'pointer', fontSize:9, fontWeight:900,
+                display:'flex', alignItems:'center', justifyContent:'center', lineHeight:1,
+                zIndex:1,
+              }}>×</button>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 
   return (
-    <div style={{minHeight:'100vh',background:'#060d18',fontFamily:"'Segoe UI',sans-serif",color:'#e2e8f0',paddingBottom:40}}>
+    <div style={{minHeight:'100vh',background:'#060d18',fontFamily:"'Segoe UI',sans-serif",color:'#e2e8f0',paddingBottom:60}}>
 
       {/* ══ HEADER ══ */}
-      <div style={{background:'linear-gradient(135deg,#0f2744,#0a1e38)',borderBottom:'2px solid #d4a017',padding:'14px 14px 0'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
+      <div style={{background:'linear-gradient(135deg,#0f2744,#0a1e38)',borderBottom:'2px solid #d4a017',padding:'14px 14px 0',position:'sticky',top:0,zIndex:10}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
           <div>
-            <div style={{fontSize:9,letterSpacing:4,color:'#d4a017',fontWeight:700}}>PANINI - FIFA WORLD CUP 2026</div>
-            <h1 style={{fontSize:17,fontWeight:900,marginTop:2}}>Meu Album</h1>
+            <div style={{fontSize:9,letterSpacing:4,color:'#d4a017',fontWeight:700}}>PANINI — FIFA WORLD CUP 2026</div>
+            <h1 style={{fontSize:17,fontWeight:900,marginTop:2}}>⚽ Meu Album</h1>
           </div>
           <div style={{display:'flex',gap:8}}>
-            {user.is_admin&&<button onClick={()=>navigate('/admin')} style={{background:'rgba(212,160,23,0.15)',border:'1px solid rgba(212,160,23,0.4)',borderRadius:8,color:'#d4a017',padding:'6px 12px',cursor:'pointer',fontSize:11,fontWeight:700}}>Admin</button>}
+            {user.is_admin && <button onClick={()=>navigate('/admin')} style={{background:'rgba(212,160,23,0.15)',border:'1px solid rgba(212,160,23,0.4)',borderRadius:8,color:'#d4a017',padding:'6px 12px',cursor:'pointer',fontSize:11,fontWeight:700}}>Admin</button>}
             <button onClick={()=>{localStorage.clear();navigate('/login');}} style={{background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,color:'#94a3b8',padding:'6px 12px',cursor:'pointer',fontSize:11}}>Sair</button>
           </div>
         </div>
+        <div style={{fontSize:11,color:'#64748b',marginBottom:8}}>Ola, <strong style={{color:'#e2e8f0'}}>{user.name}</strong></div>
 
-        <div style={{fontSize:11,color:'#64748b',marginBottom:10}}>Ola, <strong style={{color:'#e2e8f0'}}>{user.name}</strong></div>
-
-        {/* progresso */}
-        <div style={{marginBottom:10}}>
-          <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#94a3b8',marginBottom:4}}>
-            <span>Progresso do album</span>
+        {/* barra de progresso */}
+        <div style={{marginBottom:8}}>
+          <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#94a3b8',marginBottom:3}}>
+            <span>Progresso</span>
             <span style={{color:'#d4a017',fontWeight:700}}>{pct}% — {stats.coladas}/{TOTAL}</span>
           </div>
-          <div style={{height:5,background:'#1e3a5c',borderRadius:99}}>
+          <div style={{height:4,background:'#1e3a5c',borderRadius:99}}>
             <div style={{height:'100%',width:`${pct}%`,background:'linear-gradient(90deg,#d4a017,#f5cc50)',borderRadius:99,transition:'width 0.4s'}}/>
           </div>
         </div>
 
         {/* stats */}
-        <div style={{display:'flex',maxWidth:260,marginBottom:4}}>
+        <div style={{display:'flex',maxWidth:240,marginBottom:4}}>
           {[{label:'COLADAS',value:stats.coladas,color:'#4ade80'},{label:'REPETIDAS',value:stats.repetidas,color:'#d4a017'}].map((s,i)=>(
-            <div key={i} style={{flex:1,textAlign:'center',padding:'6px 0',borderRight:i===0?'1px solid #1e3a5c':'none'}}>
-              <div style={{fontSize:22,fontWeight:900,color:s.color,lineHeight:1}}>{s.value}</div>
-              <div style={{fontSize:8,color:'#64748b',letterSpacing:1,marginTop:3}}>{s.label}</div>
+            <div key={i} style={{flex:1,textAlign:'center',padding:'5px 0',borderRight:i===0?'1px solid #1e3a5c':'none'}}>
+              <div style={{fontSize:20,fontWeight:900,color:s.color,lineHeight:1}}>{s.value}</div>
+              <div style={{fontSize:8,color:'#64748b',letterSpacing:1,marginTop:2}}>{s.label}</div>
             </div>
           ))}
         </div>
 
+        {/* legenda */}
+        <div style={{display:'flex',gap:12,fontSize:9,color:'#64748b',marginBottom:4}}>
+          <span><span style={{color:'#4ade80'}}>■</span> Colada</span>
+          <span><span style={{color:'#d4a017'}}>■</span> Repetida (+N)</span>
+          <span><span style={{color:'#334155'}}>■</span> Nenhuma</span>
+          <span style={{color:'#475569'}}>Toque para adicionar • × para remover</span>
+        </div>
+
         {/* main tabs */}
-        <div style={{display:'flex',borderTop:'1px solid #1e3a5c',marginTop:8}}>
+        <div style={{display:'flex',borderTop:'1px solid #1e3a5c',marginTop:6}}>
           {[{id:'album',label:'📗 Meu Album'},{id:'buscar',label:'🔍 Buscar Trocas'}].map(t=>(
             <button key={t.id} onClick={()=>setMainTab(t.id)} style={{flex:1,padding:'10px 4px 12px',background:'none',border:'none',borderBottom:mainTab===t.id?'3px solid #d4a017':'3px solid transparent',color:mainTab===t.id?'#d4a017':'#64748b',cursor:'pointer',fontSize:12,fontWeight:700}}>
               {t.label}
@@ -223,165 +273,118 @@ export default function StickerManager() {
         </div>
       </div>
 
-      {/* ══ MEU ALBUM ══ */}
+      {/* ══ MEU ÁLBUM ══ */}
       {mainTab==='album' && (
-        <div style={{padding:'12px 14px 0'}}>
-          {/* input */}
-          <div style={{background:'rgba(255,255,255,0.04)',borderRadius:13,padding:13,marginBottom:12,border:'1px solid rgba(212,160,23,0.2)'}}>
-            <div style={{fontSize:11,color:'#94a3b8',fontWeight:600,marginBottom:8}}>Registrar figurinha(s) colada(s)</div>
-            <div style={{display:'flex',gap:8}}>
-              <input ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addSticker()}
-                placeholder="CAN16   ou   CAN16,BRA7,FRA12" maxLength={200}
-                style={{flex:1,padding:'11px 12px',background:'#0a1628',border:'1.5px solid #1e3a5c',borderRadius:9,color:'#e2e8f0',fontSize:14,fontFamily:'monospace',outline:'none'}}/>
-              <button onClick={addSticker} disabled={adding||!input.trim()} style={{padding:'11px 18px',background:adding||!input.trim()?'#1e3a5c':'linear-gradient(135deg,#d4a017,#f5cc50)',color:adding||!input.trim()?'#64748b':'#060d18',border:'none',borderRadius:9,fontWeight:900,fontSize:15,cursor:adding||!input.trim()?'not-allowed':'pointer',minWidth:50}}>
-                {adding?'...':'+'}
-              </button>
-            </div>
-            <div style={{fontSize:10,color:'#475569',marginTop:5}}>Separe por virgula para adicionar varias de uma vez</div>
-            {feedback&&(
-              <div style={{marginTop:8,padding:'8px 12px',borderRadius:8,fontSize:12,fontWeight:600,background:feedback.type==='ok'?'rgba(74,222,128,0.1)':'rgba(248,113,113,0.1)',color:feedback.type==='ok'?'#4ade80':'#f87171',border:`1px solid ${feedback.type==='ok'?'rgba(74,222,128,0.3)':'rgba(248,113,113,0.3)'}`}}>
-                {feedback.type==='ok'?'✅':'❌'} {feedback.msg}
-              </div>
-            )}
-          </div>
-
-          {/* filtros */}
-          <div style={{display:'flex',gap:6,marginBottom:12}}>
+        <div style={{padding:'12px 10px 0'}}>
+          {/* filtros + busca */}
+          <div style={{display:'flex',gap:6,marginBottom:8}}>
             {[{id:'todas',label:'Todas'},{id:'coladas',label:'Coladas'},{id:'repetidas',label:'Repetidas'}].map(f=>(
               <button key={f.id} onClick={()=>setFilter(f.id)} style={{flex:1,padding:'8px 4px',background:filter===f.id?'rgba(212,160,23,0.15)':'rgba(255,255,255,0.04)',border:`1px solid ${filter===f.id?'rgba(212,160,23,0.5)':'rgba(255,255,255,0.08)'}`,borderRadius:9,color:filter===f.id?'#d4a017':'#64748b',cursor:'pointer',fontSize:11,fontWeight:700}}>
                 {f.label}
               </button>
             ))}
           </div>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar seleção..." style={{width:'100%',padding:'9px 12px',background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:9,color:'#e2e8f0',fontSize:13,outline:'none',marginBottom:10,boxSizing:'border-box'}}/>
 
-          {/* lista */}
-          {byTeam.length===0?(
-            <div style={{textAlign:'center',padding:'50px 20px',color:'#475569'}}>
-              <div style={{fontSize:44,marginBottom:12}}>{filter==='repetidas'?'🔄':filter==='coladas'?'📗':'📖'}</div>
-              <p>{filter==='repetidas'?'Nenhuma repetida ainda.':filter==='coladas'?'Nenhuma figurinha colada ainda.':'Nenhuma figurinha registrada.'}</p>
-              {filter==='todas'&&<p style={{fontSize:12,marginTop:6}}>Use o campo acima para comecar!</p>}
-            </div>
-          ):byTeam.map(({code,name,items})=>(
-            <div key={code} style={{background:'rgba(255,255,255,0.03)',borderRadius:13,marginBottom:9,border:'1px solid rgba(255,255,255,0.07)',overflow:'hidden'}}>
-              <div style={{padding:'9px 12px',display:'flex',alignItems:'center',gap:8,borderBottom:'1px solid rgba(255,255,255,0.06)',background:'rgba(255,255,255,0.03)'}}>
-                <span style={{fontSize:19}}>{FLAGS[code]||'🏳️'}</span>
-                <span style={{fontWeight:700,fontSize:13}}>{name}</span>
-                <span style={{marginLeft:'auto',fontSize:11,color:'#64748b'}}>{items.reduce((a,i)=>a+i.owned_count,0)} fig.</span>
+          {/* grade de times */}
+          {visibleTeams.map(team => {
+            const teamStickers = Array.from({length:20},(_,i)=>{const c=`${team.code}-${i+1}`;return ownedMap[c]||0;});
+            const coladas  = teamStickers.filter(o=>o===1).length;
+            const repetidas= teamStickers.filter(o=>o>1).length;
+            const totalRep = teamStickers.reduce((a,o)=>a+Math.max(0,o-1),0);
+            return(
+              <div key={team.code} style={{background:'rgba(255,255,255,0.03)',borderRadius:12,marginBottom:8,border: coladas||repetidas ? '1px solid rgba(255,255,255,0.1)':'1px solid rgba(255,255,255,0.05)',overflow:'hidden'}}>
+                <div style={{padding:'8px 12px 0',display:'flex',alignItems:'center',gap:8}}>
+                  <span style={{fontSize:18}}>{team.flag}</span>
+                  <span style={{fontWeight:700,fontSize:13,flex:1}}>{team.name}</span>
+                  {coladas>0&&<span style={{fontSize:10,color:'#4ade80',fontWeight:700}}>{coladas} col.</span>}
+                  {totalRep>0&&<span style={{fontSize:10,color:'#d4a017',fontWeight:700,marginLeft:4}}>{totalRep} rep.</span>}
+                </div>
+                {renderSquares(team.code, addOne, removeOne, code=>ownedMap[code]||0, null)}
               </div>
-              <div style={{padding:'9px 11px',display:'flex',flexWrap:'wrap',gap:6}}>
-                {items.map(item=>{const isRep=item.owned_count>1;return(
-                  <div key={item.code} style={{background:isRep?'rgba(212,160,23,0.12)':'rgba(74,222,128,0.08)',border:`1px solid ${isRep?'rgba(212,160,23,0.5)':'rgba(74,222,128,0.3)'}`,borderRadius:8,padding:'5px 9px',display:'flex',alignItems:'center',gap:5}}>
-                    <span style={{fontWeight:700,color:isRep?'#d4a017':'#4ade80',fontSize:12}}>{code} {item.number}</span>
-                    {isRep&&<span style={{background:'#d4a017',color:'#060d18',borderRadius:20,padding:'1px 6px',fontSize:9,fontWeight:900}}>x{item.owned_count-1} p/troca</span>}
-                    <button onClick={()=>removeOne(item.code)} title="Remover 1" style={{background:'none',border:'none',color:'rgba(255,255,255,0.2)',cursor:'pointer',fontSize:12,padding:'0 2px',lineHeight:1}}>×</button>
-                  </div>
-                );})}
-              </div>
-            </div>
-          ))}
+            );
+          })}
+          {visibleTeams.length===0&&<div style={{textAlign:'center',padding:'40px 20px',color:'#475569'}}><div style={{fontSize:40,marginBottom:12}}>🔍</div><p>Nenhuma seleção encontrada</p></div>}
         </div>
       )}
 
       {/* ══ BUSCAR TROCAS ══ */}
       {mainTab==='buscar' && (
-        <div style={{padding:'14px 14px 0'}}>
-          <p style={{color:'#64748b',fontSize:12,marginBottom:14,lineHeight:1.6}}>
-            Marque as figurinhas que voce <strong style={{color:'#e2e8f0'}}>precisa</strong> e clique em <strong style={{color:'#d4a017'}}>Buscar</strong> para ver quem tem para trocar.
+        <div style={{padding:'14px 10px 0'}}>
+          <p style={{color:'#64748b',fontSize:12,marginBottom:12,lineHeight:1.6}}>
+            Marque as figurinhas que <strong style={{color:'#e2e8f0'}}>você precisa</strong> e clique em Buscar.
           </p>
+          <input value={bSearch} onChange={e=>setBSearch(e.target.value)} placeholder="Filtrar seleção..." style={{width:'100%',padding:'9px 12px',background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:9,color:'#e2e8f0',fontSize:13,outline:'none',marginBottom:10,boxSizing:'border-box'}}/>
 
-          {/* barra de busca de time */}
-          <input value={teamSearch} onChange={e=>setTeamSearch(e.target.value)} placeholder="Filtrar por seleção..." style={{width:'100%',padding:'10px 12px',background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:9,color:'#e2e8f0',fontSize:13,outline:'none',marginBottom:12,boxSizing:'border-box'}}/>
-
-          {/* grade de times */}
-          {filteredTeams.map(team=>{
-            const teamNeeded = Array.from(needed).filter(c=>c.startsWith(team.code+'-'));
+          {bTeams.map(team => {
+            const sel = Array.from({length:20},(_,i)=>needed.has(`${team.code}-${i+1}`)).filter(Boolean).length;
             return(
-            <div key={team.code} style={{background:'rgba(255,255,255,0.03)',borderRadius:12,marginBottom:8,border:teamNeeded.length>0?'1px solid rgba(212,160,23,0.35)':'1px solid rgba(255,255,255,0.06)',overflow:'hidden'}}>
-              <div style={{padding:'7px 11px',display:'flex',alignItems:'center',gap:8,background:teamNeeded.length>0?'rgba(212,160,23,0.07)':'rgba(255,255,255,0.02)'}}>
-                <span style={{fontSize:17}}>{team.flag}</span>
-                <span style={{fontWeight:700,fontSize:12,color:teamNeeded.length>0?'#d4a017':'#e2e8f0'}}>{team.name}</span>
-                {teamNeeded.length>0&&<span style={{marginLeft:'auto',background:'#d4a017',color:'#060d18',borderRadius:20,padding:'1px 7px',fontSize:9,fontWeight:900}}>{teamNeeded.length} sel.</span>}
+              <div key={team.code} style={{background:'rgba(255,255,255,0.03)',borderRadius:12,marginBottom:8,border:sel>0?'1px solid rgba(129,140,248,0.35)':'1px solid rgba(255,255,255,0.05)',overflow:'hidden'}}>
+                <div style={{padding:'8px 12px 0',display:'flex',alignItems:'center',gap:8}}>
+                  <span style={{fontSize:18}}>{team.flag}</span>
+                  <span style={{fontWeight:700,fontSize:13,flex:1,color:sel>0?'#818cf8':'#e2e8f0'}}>{team.name}</span>
+                  {sel>0&&<span style={{background:'#818cf8',color:'#fff',borderRadius:20,padding:'1px 8px',fontSize:9,fontWeight:900}}>{sel} sel.</span>}
+                </div>
+                {renderSquares(team.code, toggleNeeded, null, ()=>0, code=>needed.has(code))}
               </div>
-              <div style={{padding:'8px 10px',display:'flex',flexWrap:'wrap',gap:4}}>
-                {Array.from({length:20},(_,i)=>{
-                  const num=i+1;
-                  const code=`${team.code}-${num}`;
-                  const sel=needed.has(code);
-                  return(
-                    <button key={num} onClick={()=>toggleNeeded(code)} style={{width:28,height:28,borderRadius:6,border:sel?'2px solid #818cf8':'1px solid rgba(255,255,255,0.12)',background:sel?'rgba(129,140,248,0.25)':'rgba(255,255,255,0.03)',color:sel?'#818cf8':'#475569',cursor:'pointer',fontSize:11,fontWeight:sel?900:400,transition:'all 0.15s',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                      {num}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          );})}
+            );
+          })}
 
-          {/* botão buscar */}
-          <div style={{position:'sticky',bottom:0,background:'#060d18',padding:'12px 0 4px',marginTop:8}}>
-            <div style={{display:'flex',gap:10,alignItems:'center'}}>
-              {needed.size>0&&(
-                <button onClick={clearNeeded} style={{padding:'11px 14px',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,color:'#94a3b8',cursor:'pointer',fontSize:12}}>Limpar</button>
-              )}
-              <button onClick={buscarTrocas} disabled={searching||!needed.size} style={{flex:1,padding:'13px',background:!needed.size?'#1e3a5c':searching?'#1e3a5c':'linear-gradient(135deg,#818cf8,#6366f1)',color:!needed.size?'#475569':'#fff',border:'none',borderRadius:10,fontWeight:900,fontSize:14,cursor:!needed.size||searching?'not-allowed':'pointer',letterSpacing:0.5,boxShadow:needed.size&&!searching?'0 4px 20px rgba(99,102,241,0.35)':'none'}}>
-                {searching?'Buscando...':`🔍 Buscar${needed.size>0?` (${needed.size} selecionada${needed.size>1?'s':''})`:''}`}
+          {/* botão buscar fixo */}
+          <div style={{position:'fixed',bottom:0,left:0,right:0,background:'rgba(6,13,24,0.96)',padding:'12px 14px',borderTop:'1px solid #1e3a5c',zIndex:20}}>
+            <div style={{display:'flex',gap:10,maxWidth:700,margin:'0 auto'}}>
+              {needed.size>0&&<button onClick={()=>{setNeeded(new Set());setResults(null);}} style={{padding:'12px 14px',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:10,color:'#94a3b8',cursor:'pointer',fontSize:12}}>Limpar</button>}
+              <button onClick={buscar} disabled={searching||!needed.size} style={{flex:1,padding:'13px',background:!needed.size?'#1e3a5c':searching?'#334155':'linear-gradient(135deg,#818cf8,#6366f1)',color:!needed.size?'#475569':'#fff',border:'none',borderRadius:10,fontWeight:900,fontSize:14,cursor:!needed.size||searching?'not-allowed':'pointer',boxShadow:needed.size&&!searching?'0 4px 20px rgba(99,102,241,0.4)':'none'}}>
+                {searching?'Buscando...':`🔍 Buscar${needed.size>0?` (${needed.size} fig.)`:''}`}
               </button>
             </div>
           </div>
 
           {/* resultados */}
           {results!==null&&(
-            <div style={{marginTop:20}}>
-              <div style={{fontSize:13,fontWeight:700,color:'#94a3b8',marginBottom:12}}>
-                {results.length===0?'Nenhum usuario tem essas figurinhas para troca 😕':`${results.length} usuario${results.length>1?'s':''} com figurinhas para trocar:`}
+            <div style={{marginTop:20,paddingBottom:80}}>
+              <div style={{fontSize:13,fontWeight:700,color:'#94a3b8',marginBottom:14}}>
+                {results.length===0?'😕 Nenhum usuario tem essas figurinhas para troca.':`${results.length} usuario${results.length>1?'s':''} com figurinhas disponíveis:`}
               </div>
-
               {results.map((r,idx)=>{
-                const color = USER_COLORS[idx%USER_COLORS.length];
+                const color    = USER_COLORS[idx%USER_COLORS.length];
                 const stickerList = r.matches.map(m=>`${m.team_code} ${m.number}`).join(', ');
-                const waUrl = waLink(r.phone, stickerList);
+                const waUrl    = waLink(r.phone, stickerList);
                 return(
                   <div key={r.phone} style={{borderRadius:16,marginBottom:14,overflow:'hidden',boxShadow:'0 4px 24px rgba(0,0,0,0.3)',border:'1px solid rgba(255,255,255,0.08)'}}>
-                    {/* header colorido */}
-                    <div style={{background:`linear-gradient(135deg, ${color}dd, ${color}88)`,padding:'14px 16px',display:'flex',alignItems:'center',gap:12}}>
-                      <div style={{width:44,height:44,borderRadius:22,background:'rgba(255,255,255,0.2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,fontWeight:900,color:'#fff',flexShrink:0}}>
+                    <div style={{background:`linear-gradient(135deg,${color}cc,${color}88)`,padding:'14px 16px',display:'flex',alignItems:'center',gap:12}}>
+                      <div style={{width:46,height:46,borderRadius:23,background:'rgba(255,255,255,0.2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,fontWeight:900,color:'#fff',flexShrink:0}}>
                         {r.name.charAt(0).toUpperCase()}
                       </div>
-                      <div style={{flex:1}}>
-                        <div style={{fontWeight:900,fontSize:15,color:'#fff'}}>{r.name}</div>
-                        <div style={{fontSize:11,color:'rgba(255,255,255,0.7)',marginTop:2}}>{r.matches.length} figurinha{r.matches.length>1?'s':''} disponivel{r.matches.length>1?'is':''}</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontWeight:900,fontSize:15,color:'#fff',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{r.name}</div>
+                        <div style={{fontSize:11,color:'rgba(255,255,255,0.75)',marginTop:2}}>{r.matches.length} figurinha{r.matches.length>1?'s':''} para troca</div>
                       </div>
-                      <a href={waUrl} target="_blank" rel="noreferrer" style={{background:'#25D366',color:'#fff',borderRadius:10,padding:'8px 14px',fontWeight:800,fontSize:12,textDecoration:'none',display:'flex',alignItems:'center',gap:6,boxShadow:'0 2px 12px rgba(37,211,102,0.4)',whiteSpace:'nowrap'}}>
-                        <span style={{fontSize:16}}>💬</span> WhatsApp
+                      <a href={waUrl} target="_blank" rel="noreferrer" style={{background:'#25D366',color:'#fff',borderRadius:10,padding:'9px 14px',fontWeight:800,fontSize:12,textDecoration:'none',display:'flex',alignItems:'center',gap:5,boxShadow:'0 2px 12px rgba(37,211,102,0.45)',flexShrink:0}}>
+                        💬 WhatsApp
                       </a>
                     </div>
-
-                    {/* figurinhas */}
                     <div style={{background:'rgba(255,255,255,0.04)',padding:'12px 14px'}}>
-                      <div style={{fontSize:10,color:'#64748b',marginBottom:8,fontWeight:600}}>DISPONÍVEL PARA TROCA:</div>
+                      <div style={{fontSize:10,color:'#64748b',marginBottom:8,fontWeight:600,letterSpacing:1}}>DISPONÍVEL PARA TROCA</div>
                       <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
                         {r.matches.map(m=>(
                           <div key={m.code} style={{background:`${color}18`,border:`1px solid ${color}55`,borderRadius:8,padding:'4px 10px',display:'flex',alignItems:'center',gap:5}}>
-                            <span style={{fontSize:14}}>{FLAGS[m.team_code]||'🏳️'}</span>
+                            <span style={{fontSize:13}}>{FLAGS[m.team_code]||'🏳️'}</span>
                             <span style={{fontWeight:700,color:'#e2e8f0',fontSize:12}}>{m.team_code} {m.number}</span>
                             {m.disponiveis>1&&<span style={{background:color,color:'#fff',borderRadius:20,padding:'0 5px',fontSize:9,fontWeight:900}}>×{m.disponiveis}</span>}
                           </div>
                         ))}
                       </div>
                     </div>
-
-                    {/* telefone */}
-                    <div style={{background:'rgba(0,0,0,0.2)',padding:'8px 14px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <div style={{background:'rgba(0,0,0,0.2)',padding:'8px 14px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                       <span style={{color:'#64748b',fontSize:11}}>📱 {r.phone}</span>
-                      <a href={waUrl} target="_blank" rel="noreferrer" style={{color:'#25D366',fontSize:11,fontWeight:600,textDecoration:'none'}}>Iniciar conversa →</a>
+                      <a href={waUrl} target="_blank" rel="noreferrer" style={{color:'#25D366',fontSize:11,fontWeight:700,textDecoration:'none'}}>Iniciar conversa →</a>
                     </div>
                   </div>
                 );
               })}
             </div>
           )}
-
-          <div style={{height:80}}/>
         </div>
       )}
     </div>
