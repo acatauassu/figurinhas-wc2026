@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { jsPDF } from 'jspdf';
 import api from '../api';
 
 const ALL_TEAMS = [
@@ -55,6 +56,125 @@ const ALL_TEAMS = [
 
 const FLAGS = Object.fromEntries(ALL_TEAMS.map(t => [t.code, t.flag]));
 const TOTAL = ALL_TEAMS.length * 20;
+
+function generatePDF(type, stickers) {
+  const owned = {};
+  stickers.forEach(s => { owned[s.code] = s.owned_count; });
+
+  const doc = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
+  const PW = 210, PH = 297, MX = 10, MY = 12;
+  const COLS = 4, GAP = 2;
+  const colW   = (PW - 2*MX - (COLS-1)*GAP) / COLS; // ~46mm
+  const HDR    = 4.5;   // header height
+  const SQ     = 3.8;   // square size
+  const SQGAP  = 0.5;   // gap between squares
+  const SQPAD  = 1.5;   // padding around square grid
+  const teamH  = HDR + SQPAD + 2*(SQ+SQGAP) - SQGAP + SQPAD; // ~16mm
+  const ROW_GAP = 1.2;
+  const title = type === 'coladas'
+    ? 'FIFA WORLD CUP 2026 — MEU ALBUM'
+    : 'FIFA WORLD CUP 2026 — REPETIDAS PARA TROCA';
+
+  // ── Título ──
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(9);
+  doc.setTextColor(20,20,20);
+  doc.text(title, PW/2, MY, { align:'center' });
+
+  // ── Legenda ──
+  const LY = MY + 4;
+  doc.setFontSize(5.5);
+  doc.setFont('helvetica','normal');
+  if (type === 'coladas') {
+    doc.setFillColor(68,68,68);   doc.rect(PW/2-22, LY-2.5, 3.5, 3.5,'F');
+    doc.setTextColor(40,40,40);   doc.text('Colada no album', PW/2-17.5, LY);
+    doc.setFillColor(220,220,220); doc.rect(PW/2+5, LY-2.5, 3.5, 3.5,'F');
+    doc.setTextColor(100,100,100); doc.text('Faltando', PW/2+9.5, LY);
+  } else {
+    doc.setFillColor(26,58,10);   doc.rect(PW/2-20, LY-2.5, 3.5, 3.5,'F');
+    doc.setTextColor(40,40,40);   doc.text('Repetida disponivel', PW/2-15.5, LY);
+    doc.setFillColor(220,220,220); doc.rect(PW/2+12, LY-2.5, 3.5, 3.5,'F');
+    doc.setTextColor(100,100,100); doc.text('Nao tem', PW/2+16.5, LY);
+  }
+
+  // ── Linha separadora ──
+  const SEP = LY + 3;
+  doc.setDrawColor(30,30,30); doc.setLineWidth(0.3);
+  doc.line(MX, SEP, PW-MX, SEP);
+
+  const Y0 = SEP + 2;
+
+  // ── Grid de times ──
+  ALL_TEAMS.forEach((team, idx) => {
+    const col = idx % COLS;
+    const row = Math.floor(idx / COLS);
+    const x   = MX + col*(colW+GAP);
+    const y   = Y0 + row*(teamH+ROW_GAP);
+
+    // header
+    doc.setFillColor(22,22,22);
+    doc.rect(x, y, colW, HDR, 'F');
+
+    // code (dourado)
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(6);
+    doc.setTextColor(212,160,23);
+    doc.text(team.code, x+1.5, y+HDR-1);
+
+    // nome (cinza claro)
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(5);
+    doc.setTextColor(170,170,170);
+    const nm = team.name.length > 16 ? team.name.substring(0,15)+'.' : team.name;
+    doc.text(nm, x+13, y+HDR-1, { maxWidth: colW-14 });
+
+    // quadradinhos
+    const sqX0 = x + SQPAD;
+    const sqY0 = y + HDR + SQPAD;
+
+    for (let n = 1; n <= 20; n++) {
+      const sc  = (n-1)%10, sr = Math.floor((n-1)/10);
+      const qx  = sqX0 + sc*(SQ+SQGAP);
+      const qy  = sqY0 + sr*(SQ+SQGAP);
+      const key = `${team.code}-${n}`;
+      const cnt = owned[key]||0;
+
+      if (type === 'coladas') {
+        if (cnt >= 1) { doc.setFillColor(68,68,68);   doc.setTextColor(220,220,220); }
+        else          { doc.setFillColor(222,222,222); doc.setTextColor(160,160,160); }
+      } else {
+        const reps = Math.max(0,cnt-1);
+        if (reps>0) { doc.setFillColor(26,58,10);    doc.setTextColor(125,196,80); }
+        else        { doc.setFillColor(238,238,238);  doc.setTextColor(170,170,170); }
+      }
+
+      doc.setDrawColor(200,200,200); doc.setLineWidth(0.05);
+      doc.rect(qx, qy, SQ, SQ, 'FD');
+
+      doc.setFont('helvetica','bold');
+      doc.setFontSize(4);
+      doc.text(String(n), qx+SQ/2, qy+SQ-0.7, { align:'center' });
+
+      // badge ×N para repetidas
+      if (type==='repetidas') {
+        const reps = Math.max(0,cnt-1);
+        if (reps>1) {
+          doc.setFillColor(212,160,23);
+          doc.rect(qx+SQ-1.6, qy, 1.6, 1.6,'F');
+          doc.setFontSize(3); doc.setTextColor(20,20,20);
+          doc.text(String(reps), qx+SQ-0.8, qy+1.15, { align:'center' });
+        }
+      }
+    }
+  });
+
+  // ── Rodapé ──
+  doc.setFontSize(5); doc.setFont('helvetica','normal'); doc.setTextColor(160,160,160);
+  doc.text(`figurinhas-app-hdbh.onrender.com  |  ${new Date().toLocaleDateString('pt-BR')}`, PW/2, PH-5, { align:'center' });
+
+  const fname = type==='coladas' ? 'album-wc2026.pdf' : 'repetidas-wc2026.pdf';
+  doc.save(fname);
+}
 
 const USER_COLORS = ['#2563eb','#7c3aed','#db2777','#059669','#d97706','#0891b2','#65a30d','#dc2626'];
 
@@ -285,6 +405,18 @@ export default function StickerManager() {
             ))}
           </div>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar seleção..." style={{width:'100%',padding:'9px 12px',background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:9,color:'#e2e8f0',fontSize:13,outline:'none',marginBottom:10,boxSizing:'border-box'}}/>
+
+          {/* botões PDF */}
+          <div style={{display:'flex',gap:8,marginBottom:14}}>
+            {[
+              {type:'coladas',   label:'PDF Álbum',    icon:'🖨️'},
+              {type:'repetidas', label:'PDF Repetidas', icon:'🔄'},
+            ].map(b => (
+              <button key={b.type} onClick={()=>generatePDF(b.type, stickers)} style={{flex:1,padding:'9px 6px',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.12)',borderRadius:9,color:'#e2e8f0',cursor:'pointer',fontSize:11,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',gap:5}}>
+                <span>{b.icon}</span>{b.label}
+              </button>
+            ))}
+          </div>
 
           {/* grade de times */}
           {visibleTeams.map(team => {
